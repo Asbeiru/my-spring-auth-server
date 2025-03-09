@@ -1,25 +1,25 @@
 server:
-  port: 9443
+  port: 9001
   ssl:
-    bundle: demo-authorizationserver
-    client-auth: want
+    enabled: false
 
 spring:
-  ssl:
-    bundle:
-      jks:
-        demo-authorizationserver:
-          key:
-            alias: demo-authorizationserver-sample
-            password: password
-          keystore:
-            location: classpath:keystore.p12
-            password: password
-            type: PKCS12
-          truststore:
-            location: classpath:keystore.p12
-            password: password
-            type: PKCS12
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://192.168.0.102:3306/oauth2_auth_server?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
   security:
     oauth2:
       client:
@@ -41,6 +41,9 @@ spring:
             user-name-attribute: email
           github:
             user-name-attribute: login
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:9001
 
 logging:
   level:
@@ -48,3 +51,4 @@ logging:
     org.springframework.web: INFO
     org.springframework.security: INFO
     org.springframework.security.oauth2: INFO
+    org.springframework.jdbc.core: TRACE

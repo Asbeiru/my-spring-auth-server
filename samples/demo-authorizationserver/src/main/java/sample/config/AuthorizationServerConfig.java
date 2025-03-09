@@ -15,10 +15,16 @@
  */
 package sample.config;
 
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import java.time.Instant;
 import java.util.UUID;
 
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import sample.authentication.DeviceClientAuthenticationProvider;
@@ -32,17 +38,17 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.embedded.EmbeddedDatabase;
-import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseBuilder;
-import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.core.oidc.OidcScopes;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationConsentService;
 import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
@@ -65,85 +71,59 @@ import static org.springframework.security.oauth2.server.authorization.config.an
  * @author Steve Riesenberg
  * @since 1.1
  */
-@Configuration(proxyBeanMethods = false)
+@Configuration
+@EnableWebSecurity
 public class AuthorizationServerConfig {
 	private static final String CUSTOM_CONSENT_PAGE_URI = "/oauth2/consent";
 
 	@Bean
 	@Order(Ordered.HIGHEST_PRECEDENCE)
 	public SecurityFilterChain authorizationServerSecurityFilterChain(
-			HttpSecurity http, RegisteredClientRepository registeredClientRepository,
+			HttpSecurity http,
+			RegisteredClientRepository registeredClientRepository,
+			OAuth2AuthorizationService authorizationService,
+			OAuth2AuthorizationConsentService authorizationConsentService,
 			AuthorizationServerSettings authorizationServerSettings) throws Exception {
 
-		/*
-		 * This sample demonstrates the use of a public client that does not
-		 * store credentials or authenticate with the authorization server.
-		 *
-		 * The following components show how to customize the authorization
-		 * server to allow for device clients to perform requests to the
-		 * OAuth 2.0 Device Authorization Endpoint and Token Endpoint without
-		 * a clientId/clientSecret.
-		 *
-		 * CAUTION: These endpoints will not require any authentication, and can
-		 * be accessed by any client that has a valid clientId.
-		 *
-		 * It is therefore RECOMMENDED to carefully monitor the use of these
-		 * endpoints and employ any additional protections as needed, which is
-		 * outside the scope of this sample.
-		 */
-		DeviceClientAuthenticationConverter deviceClientAuthenticationConverter =
-				new DeviceClientAuthenticationConverter(
-						authorizationServerSettings.getDeviceAuthorizationEndpoint());
-		DeviceClientAuthenticationProvider deviceClientAuthenticationProvider =
-				new DeviceClientAuthenticationProvider(registeredClientRepository);
+		OAuth2AuthorizationServerConfigurer authorizationServerConfigurer = new OAuth2AuthorizationServerConfigurer();
 
-		OAuth2AuthorizationServerConfigurer authorizationServerConfigurer = authorizationServer();
+		http.securityMatcher(authorizationServerConfigurer.getEndpointsMatcher())
+			.authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
+			.csrf(csrf -> csrf.ignoringRequestMatchers(authorizationServerConfigurer.getEndpointsMatcher()))
+			.apply(authorizationServerConfigurer);
 
-		// @formatter:off
-		http
-			.securityMatcher(authorizationServerConfigurer.getEndpointsMatcher())
-			.with(authorizationServerConfigurer, (authorizationServer) ->
-				authorizationServer
-					.deviceAuthorizationEndpoint(deviceAuthorizationEndpoint ->
-						deviceAuthorizationEndpoint.verificationUri("/activate")
-					)
-					.deviceVerificationEndpoint(deviceVerificationEndpoint ->
-						deviceVerificationEndpoint.consentPage(CUSTOM_CONSENT_PAGE_URI)
-					)
-					.clientAuthentication(clientAuthentication ->
-						clientAuthentication
-							.authenticationConverter(deviceClientAuthenticationConverter)
-							.authenticationProvider(deviceClientAuthenticationProvider)
-					)
-					.authorizationEndpoint(authorizationEndpoint ->
-						authorizationEndpoint.consentPage(CUSTOM_CONSENT_PAGE_URI))
-					.oidc(Customizer.withDefaults())	// Enable OpenID Connect 1.0
+		authorizationServerConfigurer
+			.registeredClientRepository(registeredClientRepository)
+			.authorizationService(authorizationService)
+			.authorizationConsentService(authorizationConsentService)
+			.authorizationEndpoint(authorizationEndpoint ->
+				authorizationEndpoint.consentPage(CUSTOM_CONSENT_PAGE_URI))
+			.oidc(Customizer.withDefaults());
+
+		http.exceptionHandling(exceptions ->
+			exceptions.defaultAuthenticationEntryPointFor(
+				new LoginUrlAuthenticationEntryPoint("/login"),
+				new MediaTypeRequestMatcher(org.springframework.http.MediaType.TEXT_HTML)
 			)
-			.authorizeHttpRequests((authorize) ->
-				authorize.anyRequest().authenticated()
-			)
-			// Redirect to the /login page when not authenticated from the authorization endpoint
-			// NOTE: DefaultSecurityConfig is configured with formLogin.loginPage("/login")
-			.exceptionHandling((exceptions) -> exceptions
-				.defaultAuthenticationEntryPointFor(
-					new LoginUrlAuthenticationEntryPoint("/login"),
-					new MediaTypeRequestMatcher(MediaType.TEXT_HTML)
-				)
-			);
-		// @formatter:on
+		);
+
 		return http.build();
 	}
 
-	// @formatter:off
 	@Bean
-	public JdbcRegisteredClientRepository registeredClientRepository(JdbcTemplate jdbcTemplate) {
-		RegisteredClient messagingClient = RegisteredClient.withId(UUID.randomUUID().toString())
+	public RegisteredClientRepository registeredClientRepository(JdbcTemplate jdbcTemplate) {
+		JdbcRegisteredClientRepository repository = new JdbcRegisteredClientRepository(jdbcTemplate);
+
+		RegisteredClient registeredClient = RegisteredClient.withId(UUID.randomUUID().toString())
 				.clientId("messaging-client")
+				.clientIdIssuedAt(Instant.now())
 				.clientSecret("{noop}secret")
 				.clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+				.clientAuthenticationMethod(ClientAuthenticationMethod.NONE)
 				.authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
 				.authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
 				.authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+				.authorizationGrantType(AuthorizationGrantType.DEVICE_CODE)
 				.redirectUri("http://127.0.0.1:8080/login/oauth2/code/messaging-client-oidc")
 				.redirectUri("http://127.0.0.1:8080/authorized")
 				.postLogoutRedirectUri("http://127.0.0.1:8080/logged-out")
@@ -151,69 +131,27 @@ public class AuthorizationServerConfig {
 				.scope(OidcScopes.PROFILE)
 				.scope("message.read")
 				.scope("message.write")
-				.scope("user.read")
-				.clientSettings(ClientSettings.builder().requireAuthorizationConsent(true).build())
+				.clientSettings(ClientSettings.builder()
+					.requireAuthorizationConsent(true)
+					.requireProofKey(true)
+					.build())
+				.tokenSettings(TokenSettings.builder()
+					.build())
 				.build();
 
-		RegisteredClient deviceClient = RegisteredClient.withId(UUID.randomUUID().toString())
-				.clientId("device-messaging-client")
-				.clientAuthenticationMethod(ClientAuthenticationMethod.NONE)
-				.authorizationGrantType(AuthorizationGrantType.DEVICE_CODE)
-				.authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
-				.scope("message.read")
-				.scope("message.write")
-				.build();
-
-		RegisteredClient tokenExchangeClient = RegisteredClient.withId(UUID.randomUUID().toString())
-				.clientId("token-client")
-				.clientSecret("{noop}token")
-				.clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
-				.authorizationGrantType(new AuthorizationGrantType("urn:ietf:params:oauth:grant-type:token-exchange"))
-				.scope("message.read")
-				.scope("message.write")
-				.build();
-
-		RegisteredClient mtlsDemoClient = RegisteredClient.withId(UUID.randomUUID().toString())
-				.clientId("mtls-demo-client")
-				.clientAuthenticationMethod(ClientAuthenticationMethod.TLS_CLIENT_AUTH)
-				.clientAuthenticationMethod(ClientAuthenticationMethod.SELF_SIGNED_TLS_CLIENT_AUTH)
-				.authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
-				.scope("message.read")
-				.scope("message.write")
-				.clientSettings(
-						ClientSettings.builder()
-								.x509CertificateSubjectDN("CN=demo-client-sample,OU=Spring Samples,O=Spring,C=US")
-								.jwkSetUrl("http://127.0.0.1:8080/jwks")
-								.build()
-				)
-				.tokenSettings(
-						TokenSettings.builder()
-								.x509CertificateBoundAccessTokens(true)
-								.build()
-				)
-				.build();
-
-		// Save registered client's in db as if in-memory
-		JdbcRegisteredClientRepository registeredClientRepository = new JdbcRegisteredClientRepository(jdbcTemplate);
-		registeredClientRepository.save(messagingClient);
-		registeredClientRepository.save(deviceClient);
-		registeredClientRepository.save(tokenExchangeClient);
-		registeredClientRepository.save(mtlsDemoClient);
-
-		return registeredClientRepository;
+		repository.save(registeredClient);
+		return repository;
 	}
-	// @formatter:on
 
 	@Bean
-	public JdbcOAuth2AuthorizationService authorizationService(JdbcTemplate jdbcTemplate,
+	public OAuth2AuthorizationService authorizationService(JdbcTemplate jdbcTemplate,
 			RegisteredClientRepository registeredClientRepository) {
 		return new JdbcOAuth2AuthorizationService(jdbcTemplate, registeredClientRepository);
 	}
 
 	@Bean
-	public JdbcOAuth2AuthorizationConsentService authorizationConsentService(JdbcTemplate jdbcTemplate,
+	public OAuth2AuthorizationConsentService authorizationConsentService(JdbcTemplate jdbcTemplate,
 			RegisteredClientRepository registeredClientRepository) {
-		// Will be used by the ConsentController
 		return new JdbcOAuth2AuthorizationConsentService(jdbcTemplate, registeredClientRepository);
 	}
 
@@ -224,9 +162,27 @@ public class AuthorizationServerConfig {
 
 	@Bean
 	public JWKSource<SecurityContext> jwkSource() {
-		RSAKey rsaKey = Jwks.generateRsa();
+		KeyPair keyPair = generateRsaKey();
+		RSAPublicKey publicKey = (RSAPublicKey) keyPair.getPublic();
+		RSAPrivateKey privateKey = (RSAPrivateKey) keyPair.getPrivate();
+		RSAKey rsaKey = new RSAKey.Builder(publicKey)
+				.privateKey(privateKey)
+				.keyID(UUID.randomUUID().toString())
+				.build();
 		JWKSet jwkSet = new JWKSet(rsaKey);
-		return (jwkSelector, securityContext) -> jwkSelector.select(jwkSet);
+		return new ImmutableJWKSet<>(jwkSet);
+	}
+
+	private static KeyPair generateRsaKey() {
+		KeyPair keyPair;
+		try {
+			KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA");
+			keyPairGenerator.initialize(2048);
+			keyPair = keyPairGenerator.generateKeyPair();
+		} catch (Exception ex) {
+			throw new IllegalStateException(ex);
+		}
+		return keyPair;
 	}
 
 	@Bean
@@ -236,21 +192,8 @@ public class AuthorizationServerConfig {
 
 	@Bean
 	public AuthorizationServerSettings authorizationServerSettings() {
-		return AuthorizationServerSettings.builder().build();
+		return AuthorizationServerSettings.builder()
+			.issuer("http://localhost:9001")
+			.build();
 	}
-
-	@Bean
-	public EmbeddedDatabase embeddedDatabase() {
-		// @formatter:off
-		return new EmbeddedDatabaseBuilder()
-				.generateUniqueName(true)
-				.setType(EmbeddedDatabaseType.H2)
-				.setScriptEncoding("UTF-8")
-				.addScript("org/springframework/security/oauth2/server/authorization/oauth2-authorization-schema.sql")
-				.addScript("org/springframework/security/oauth2/server/authorization/oauth2-authorization-consent-schema.sql")
-				.addScript("org/springframework/security/oauth2/server/authorization/client/oauth2-registered-client-schema.sql")
-				.build();
-		// @formatter:on
-	}
-
 }
